@@ -226,7 +226,7 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
     #frac = 0.05 # 元データに対するサンプル割合
     frac = 0.5 # 元データに対するサンプル割合
     sample_size = int(len(df_wrime) * frac) # サンプル数
-    df_wrime = df_wrime.sample(frac=frac, random_state=42).reset_index(drop=True) # ランダムにサンプルを選択、シャッフルし、インデックスをリセット
+    df_wrime = df_wrime.sample(frac=frac, random_state=args.seed).reset_index(drop=True) # ランダムにサンプルを選択、シャッフルし、インデックスをリセット
     logger.info(f"データを {sample_size} サンプルに制限しました。") #　メッセージをログへ出力
 
     # 全Sentenceのクリーニング
@@ -329,7 +329,7 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
         load_best_model_at_end=True, # 学習終了後、最良モデルを読み込む
         metric_for_best_model="accuracy_all_emotions", # 最良モデルの指標
         greater_is_better=True, # 正解率が高いほど良い
-        seed=42, # シード値
+        seed=args.seed, # シード値
         fp16=True,                                    # メモリ節約のため、半精度学習を有効化
         prediction_loss_only=False                    # 評価メトリクスに 'eval_accuracy_all_emotions'を保持するためFalse
     )
@@ -348,17 +348,16 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
         compute_metrics=func_compute_metrics # 評価関数
     )
 
-    # --------------------------------------------------------------------------------------------
-    # epoch=0の場合は、最良モデルをロードする。
-    # --------------------------------------------------------------------------------------------
+    # epoch=0の場合は、保存されたモデルがない場合はエラーを出力して終了。
     best_model_path = "./best_model"
     if num_train_epochs == 0:
-        logger.info("epoch=0のため、学習は実行されません。最良モデルをロードします。")
-        if os.path.exists(best_model_path):
-            model = AutoModelForSequenceClassification.from_pretrained("./best_model").to(device)
-            logger.info("学習済みの最良モデルをロードしました。")
-        else:
-            raise FileNotFoundError(f"最良モデルが見つかりません: {best_model_path}") # 保存されたモデルがない場合はエラーを出力して終了
+        logger.info("epoch=0のため、学習は実行されません。")
+        if not os.path.exists(best_model_path):
+            raise FileNotFoundError(f"保存されたモデルが見つかりません: {best_model_path}")
+    # 学習前に保存されたモデルが存在する場合は、ロードする。
+    if os.path.exists(best_model_path):
+        model = AutoModelForSequenceClassification.from_pretrained("./best_model").to(device)
+        logger.info("保存されたモデルをロードしました。")
     # ----------------------------------------------------------------------------------------
     # 学習実行
     # ----------------------------------------------------------------------------------------
@@ -370,7 +369,7 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
     # --------------------------------------------------------------------------------------------
     # (学習またはepoch=0後) 学習,検証データ(サンプル削減済)で評価関数を計算する。
     # --------------------------------------------------------------------------------------------
-    logger.info("最良モデルを使用し、学習,検証データ(サンプル削減済)で評価関数を計算します。")
+    logger.info("学習,検証データ(サンプル削減済)で評価関数を計算します。")
     train_metrics = trainer.evaluate(eval_dataset=dataset_all["train"])
     logger.info(f"Train metrics: {train_metrics}")
     val_metrics = trainer.evaluate(eval_dataset=dataset_all["validation"])
@@ -379,7 +378,7 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
     # --------------------------------------------------------------------------------------------
     # 元データ(サンプル削減済)に予測結果 32クラス確率(softmax後) & 8感情強度 を追加してCSV出力
     # --------------------------------------------------------------------------------------------
-    logger.info("元データ(サンプル削減済)に対して予測し、CSV出力します...")
+    logger.info("分割前データ(サンプル削減済)に対して予測し、CSV出力します...")
     model.eval()
     batch_size = 100
     all_logits = []
@@ -452,7 +451,7 @@ def main():
                         help="学習エポック数(0なら学習スキップで評価のみ)")
     parser.add_argument("--use_cache", type=bool, default=True,
                         help="TrueならHugging Faceのキャッシュ使用, Falseならキャッシュ削除")
-    parser.add_argument("--seed_data", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=42,
                         help="データ選択のシード")
     args = parser.parse_args()
 
