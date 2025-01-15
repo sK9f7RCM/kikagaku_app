@@ -1,5 +1,3 @@
-# Version: 6
-
 import logging # ロギングモジュールのインポート
 
 import os
@@ -28,12 +26,6 @@ from datasets import load_dataset, DatasetDict
 # FastAPI関連
 from fastapi import FastAPI
 from pydantic import BaseModel
-import requests
-
-# Streamlit関連
-import streamlit as st
-import matplotlib
-import matplotlib.pyplot as plt
 
 # ================================================================================================
 # グローバル設定
