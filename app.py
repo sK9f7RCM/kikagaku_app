@@ -1,0 +1,92 @@
+# Version: 6
+
+import logging # ロギングモジュールのインポート
+
+import os
+import sys
+import argparse
+import warnings
+import shutil
+from pathlib import Path
+from typing import Dict, Any, Tuple
+
+import torch
+from torch import nn
+from torch.utils.data import Dataset
+
+import pandas as pd
+import numpy as np
+
+# transformers関連
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import TrainingArguments, Trainer
+from transformers.trainer_utils import EvalPrediction
+
+# Hugging Face Datasets
+from datasets import load_dataset, DatasetDict
+
+# FastAPI関連
+from fastapi import FastAPI
+from pydantic import BaseModel
+import requests
+
+# Streamlit関連
+import streamlit as st
+import matplotlib
+import matplotlib.pyplot as plt
+
+# ================================================================================================
+# ログモジュールによるログの設定
+# ================================================================================================
+os.makedirs("./log", exist_ok=True) # 既存ログがあってもよい
+
+logging.basicConfig(
+    level=logging.INFO, # INFO, WARNING, ERROR, CRITICALを出力(DEBUGは出力しない)
+    format='%(asctime)s [%(levelname)s] %(message)s', # ログの形式: 時刻, ログレベル, メッセージ
+    handlers=[ # 出力先を制御
+        logging.StreamHandler(sys.stdout),              # ログは標準出力に出力する。
+        logging.FileHandler("./log/general.log", mode='a', encoding='utf-8')  # ファイル出力 ※追記モード, UTF-8
+    ]
+)
+
+logger = logging.getLogger(__name__) # 現在のモジュール(__name__)のロガーを取得
+
+# ================================================================================================
+# Python標準のWarnings をログに取り込む設定
+# ================================================================================================
+logging.captureWarnings(True)        # Warningsをログに取り込む
+warnings.simplefilter("default")     # 重複するWarningを1度だけ表示。ログには全て出力される
+
+# ================================================================================================
+# フロントエンド Streamlitでの簡易UI
+# ================================================================================================
+def func_streamlit_app():
+
+    st.title("日本語テキストの感情強度予測 (8感情×4強度=32クラス分類)")
+    st.write("文章を入力して「予測実行」を押すと、8感情の4段階強度を表示します。")
+
+    input_text = st.text_area("入力文章", "")
+    if st.button("予測実行"):
+        if not input_text.strip():
+            st.warning("文章が空です。")
+            return
+        
+        # FastAPIエンドポイントを呼び出し
+        response = requests.post("http://127.0.0.1:8000/predict", json={"text": input_text})
+        result = response.json()
+
+        # 表示
+        st.subheader("予測結果 (8感情の強度)")
+        for emo, strength in result["emotion_strengths"].items():
+            st.write(f"{emo}: {strength}")
+
+        # 棒グラフ描画
+        st.subheader("32クラスの確率(棒グラフ)")
+        matplotlib.rcParams['font.family'] = 'Meiryo'
+        fig, ax = plt.subplots(figsize=(8, 6))
+        x_labels = list(result["class_probs"].keys())
+        y_vals = list(result["class_probs"].values())
+        ax.bar(x_labels, y_vals)
+        plt.xticks(rotation=90, fontsize=8)
+        plt.tight_layout()
+        st.pyplot(fig)
