@@ -70,18 +70,14 @@ app = FastAPI()
 # ================================================================================================
 def func_fastapi_predict(text: str) -> Dict[str, Any]:
 
-    logger.info("リクエストを受け付けたので、予測処理を開始します。") #　メッセージをログへ出力
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # デバイスの設定
-    logger.info("GPUを使用します。" if torch.cuda.is_available() else "GPUが使用できないためCPUを使用します。") #　メッセージをログへ出力
 
     # 最良モデルをロードする。
     best_model_path = "./best_model"
     if os.path.exists(best_model_path):
         model = AutoModelForSequenceClassification.from_pretrained("./best_model").to(device)
-        logger.info("学習済みの最良モデルをロードしました。")
     else:
-        raise FileNotFoundError(f"最良モデルが見つかりません: {best_model_path}") # 保存されたモデルがない場合はエラーを出力して終了
+        raise FileNotFoundError(f"保存されたモデルが見つかりません: {best_model_path}") # 保存されたモデルがない場合はエラーを出力して終了
     model.eval()
 
     text_cleaned = func_clean_text(text) # 入力テキストのクリーニング
