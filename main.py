@@ -24,8 +24,11 @@ from transformers.trainer_utils import EvalPrediction
 from datasets import load_dataset, DatasetDict
 
 # FastAPI関連
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException 
 from pydantic import BaseModel
+
+# ログ設定
+logging.basicConfig(filename="./log/api_requests.log", level=logging.INFO, format="%(asctime)s - %(message)s")
 
 # ================================================================================================
 # グローバル設定
@@ -63,12 +66,14 @@ class InputText(BaseModel): # リクエストデータの構造を定義し、�
 
 app = FastAPI()
 
-@app.post("/predict") # POSTリクエストを受け取るエンドポイント
 
 # ================================================================================================
 #  - 入力テキストを受け取り、予測結果を返す関数を定義
 # ================================================================================================
-def func_fastapi_predict(text: str) -> Dict[str, Any]:
+@app.post("/predict") # POSTリクエストを受け取るエンドポイント
+def func_fastapi_predict(text: InputText) -> Dict[str, Any]: # strではなく、InputText型としないと型不一致で422エラーになります。
+    print(text)
+    logging.info(f"リクエストを受け取りました。: {text}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # デバイスの設定
 
@@ -109,7 +114,10 @@ def func_fastapi_predict(text: str) -> Dict[str, Any]:
         pred_strength = int(np.argmax(chunk_softmax)) # 最大確率の強度
         dict_emotion_strength[emo] = pred_strength # 最大確率の強度を辞書に追加
 
-    return {
+    result = {
         "emotion_strengths": dict_emotion_strength, # 8感情の強度
-        "class_probs": dict_probs_32 # 32クラスの確率
+        "class_probs": dict_probs_32, # 32クラスの確率
+        "emotions": ls_emotions
     }
+    logging.info(f"応答します。: {result}")
+    return result

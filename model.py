@@ -6,7 +6,7 @@ import argparse
 import warnings
 import shutil
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List, Set
 
 import torch
 from torch import nn
@@ -14,6 +14,8 @@ from torch.utils.data import Dataset
 
 import pandas as pd
 import numpy as np
+from collections import Counter
+import random
 
 # transformers関連
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -113,7 +115,12 @@ class class_MultiEmotionTrainer(Trainer):
         # ...
         labels = labels.view(-1) # -1 は「バッチサイズに基づき自動計算される次元」を意味する。
 
-        loss_fct = nn.CrossEntropyLoss() # 4強度についての多クラス分類なので、交差エントロピー損失関数を使用。小さいほど正確な予測。
+        # クラスの重みを正解ラベルの分布から計算
+        label_counts = Counter(labels.tolist())  # 各ラベルの出現回数をカウント
+        total_samples = sum(label_counts.values())
+        class_weights = torch.tensor([total_samples / label_counts[i] for i in range(4)], dtype=torch.float).to(logits.device)
+
+        loss_fct = nn.CrossEntropyLoss(weight=class_weights) # 4強度についての多クラス分類なので、交差エントロピー損失関数を使用。小さいほど正確な予測。
         loss = loss_fct(logits, labels) # softmax関数により4強度の予測値合計を1に正規化した後、正解ラベル(正解の感情強度)の分類確率を取得。負の対数尤度 loss=-log(正解の感情強度の分類確率) 。
         # loss: (batch_size*8,)
         # loss[0] -> [Joy] 損失
@@ -141,10 +148,20 @@ def func_compute_metrics(eval_pred: EvalPrediction) -> Dict[str, float]: # EvalP
     # labels: (batch_size, 8) -> (batch_size*8,)
     labels = labels.reshape(-1)
 
-    # 正解率を計算。
+    # クラスの重みを正解ラベルの分布から計算
+    label_counts = Counter(labels.tolist())  # 各ラベルの出現回数をカウント
+    total_samples = sum(label_counts.values())
+    class_weights = torch.tensor([total_samples / label_counts[i] for i in range(4)], dtype=torch.float).to(logits.device)
+
+    # 重み付き正解率を計算。
     predictions = torch.argmax(torch.tensor(logits), dim=-1) # 最後の次元(4強度)に対してargmaxを取る
-    correct = (predictions == torch.tensor(labels)).sum().item() # 損失計算のときとは異なり、分類確率の大きさは考慮されない。最大確率をとるラベルが正解と一致するかだけ。
-    accuracy = correct / len(labels) # 正解数 / データ点数
+    #correct = (predictions == torch.tensor(labels)).sum().item() # 損失計算のときとは異なり、分類確率の大きさは考慮されない。最大確率をとるラベルが正解と一致するかだけ。
+    correct_weighted = sum( # 正解した部分の重み合計を計算
+        class_weights[int(label)] if int(label) == int(pred) else 0
+        for label, pred in zip(labels, predictions)
+    )
+    #accuracy = correct / len(labels) # 正解数 / データ点数
+    accuracy = correct_weighted / total_samples
 
     return {"accuracy_all_emotions": float(accuracy)} # 正解率を返す
 
@@ -191,7 +208,7 @@ def func_tokenize_and_align(dict_batch: Dict[str, Any], tokenizer: AutoTokenizer
 # ================================================================================================
 #   学習,検証の定義
 # ================================================================================================
-def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライン引数を受け取る
+def func_train_and_eval(args: argparse.Namespace, used_indices) -> None: # コマンドライン引数を受け取る
     logger.info("=== 開始: 学習,検証プロセス ===") #　メッセージをログへ出力
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # デバイスの設定
@@ -209,12 +226,26 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
     df_wrime = pd.read_csv(file_path, sep='\t', encoding='utf-8') # .tsvファイルをDataFrameとして読み込む
     logger.info(f"元データのサイズ: {df_wrime.shape}") #　メッセージをログへ出力
     logger.info(f"カラム一覧: {df_wrime.columns.tolist()}") #　メッセージをログへ出力
+    logger.info(f"使用済データサンプル数: {len(used_indices)}") #　メッセージをログへ出力
 
-    # サンプル数を制限する
-    #frac = 0.05 # 元データに対するサンプル割合
-    frac = 0.5 # 元データに対するサンプル割合
-    sample_size = int(len(df_wrime) * frac) # サンプル数
-    df_wrime = df_wrime.sample(frac=frac, random_state=args.seed).reset_index(drop=True) # ランダムにサンプルを選択、シャッフルし、インデックスをリセット
+    # サンプル数を制限し、一度使用したデータを追跡する
+
+    all_indices = set(range(len(df_wrime)))  # 全データのインデックスを取得
+    unused_indices = list(all_indices - used_indices)  # 未使用データのインデックスを抽出
+
+    sample_size = args.sample_size # サンプル数
+    if len(unused_indices) < sample_size: # サンプリング可能なデータが不足している場合、# サンプル数を残りデータ数に合わせる
+        logger.info("サンプリング可能なデータが不足しています。")
+        sample_size = len(unused_indices) 
+    if len(unused_indices) == 0: # 未使用データがない場合、追跡セットを初期化
+        used_indices.clear()
+        unused_indices = list(all_indices)
+        logger.info(f"未使用データがないので、データの追跡セットを初期化しました。") #　メッセージをログへ出力
+
+    random.seed(args.seed)  # シードを指定
+    sampled_indices = random.sample(unused_indices, sample_size)  # 未使用データからランダムサンプリング
+    used_indices.update(sampled_indices)  # 使用済みデータのインデックスを更新
+    df_wrime = df_wrime.iloc[sampled_indices].reset_index(drop=True)  # サンプルデータを取得し、インデックスをリセット
     logger.info(f"データを {sample_size} サンプルに制限しました。") #　メッセージをログへ出力
 
     # 全Sentenceのクリーニング
@@ -308,12 +339,12 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
     training_args = TrainingArguments(
         output_dir=output_dir, # 学習結果の出力先
         num_train_epochs=num_train_epochs, # Epoch数
-        per_device_train_batch_size=100, # 学習時のバッチサイズ
-        per_device_eval_batch_size=100, # 検証時のバッチサイズ
-        eval_strategy="epoch",  # 検証の頻度
-        save_strategy="epoch",  # モデルの保存頻度
+        per_device_train_batch_size=args.batch_size, # 学習時のバッチサイズ
+        per_device_eval_batch_size=args.batch_size, # 検証時のバッチサイズ
         logging_dir="./log",
-        logging_steps=100, # 100バッチ毎にログを出力
+        logging_strategy="epoch", # 学習データ & 損失関数のログ出力頻度
+        eval_strategy="epoch", # 検証データ & 評価関数のログ出力頻度
+        save_strategy="epoch", # 1epoch毎にモデル保存
         load_best_model_at_end=True, # 学習終了後、最良モデルを読み込む
         metric_for_best_model="accuracy_all_emotions", # 最良モデルの指標
         greater_is_better=True, # 正解率が高いほど良い
@@ -336,20 +367,21 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
         compute_metrics=func_compute_metrics # 評価関数
     )
 
-    # epoch=0の場合は、保存されたモデルがない場合はエラーを出力して終了。
+    
     best_model_path = "./best_model"
-    if num_train_epochs == 0:
+    if num_train_epochs == 0: # epoch=0の場合は、保存されたモデルがない場合はエラーを出力して終了。
         logger.info("epoch=0のため、学習は実行されません。")
         if not os.path.exists(best_model_path):
             raise FileNotFoundError(f"保存されたモデルが見つかりません: {best_model_path}")
-    # 学習前に保存されたモデルが存在する場合は、ロードする。
-    if os.path.exists(best_model_path):
+    
+    if os.path.exists(best_model_path): # 学習前に保存されたモデルが存在する場合は、ロードする。
         model = AutoModelForSequenceClassification.from_pretrained("./best_model").to(device)
         logger.info("保存されたモデルをロードしました。")
     # ----------------------------------------------------------------------------------------
     # 学習実行
     # ----------------------------------------------------------------------------------------
-    else:
+    if num_train_epochs != 0:
+        logger.info("学習を開始します。")
         trainer.train()
         trainer.save_model("./best_model") # 学習終了時のモデルを保存。設定で学習終了時に評価関数が最良のモデルをロードするようにしている。
         logger.info("学習完了: 最良モデルを ./best_model に保存しました。")
@@ -366,9 +398,9 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
     # --------------------------------------------------------------------------------------------
     # 元データ(サンプル削減済)に予測結果 32クラス確率(softmax後) & 8感情強度 を追加してCSV出力
     # --------------------------------------------------------------------------------------------
-    logger.info("分割前データ(サンプル削減済)に対して予測し、CSV出力します...")
+    """logger.info("分割前データ(サンプル削減済)に対して予測し、CSV出力します...")
     model.eval()
-    batch_size = 100
+    batch_size = args.batch_size # バッチサイズ
     all_logits = []
 
     for start_idx in range(0, len(df_wrime), batch_size): # バッチサイズ毎にサンプルを処理
@@ -426,7 +458,7 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
 
     output_csv = "./predict_wrime-ver1.csv"  # csv保存先
     df_wrime.to_csv(output_csv, index=False, encoding="utf-8-sig")
-    logger.info(f"予測結果を保存: {output_csv}")
+    logger.info(f"予測結果を保存: {output_csv}")"""
 
     logger.info("=== 学習/検証プロセスが完了しました ===")
 
@@ -435,16 +467,20 @@ def func_train_and_eval(args: argparse.Namespace) -> None: # コマンドライ�
 # ================================================================================================
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epoch", type=int, default=3,
-                        help="学習エポック数(0なら学習スキップで評価のみ)")
-    parser.add_argument("--use_cache", type=bool, default=True,
-                        help="TrueならHugging Faceのキャッシュ使用, Falseならキャッシュ削除")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="データ選択のシード")
+    parser.add_argument("--epoch", type=int, default=3, help="学習エポック数(0なら学習スキップで評価のみ)")
+    parser.add_argument("--use_cache", type=bool, default=True, help="TrueならHugging Faceのキャッシュ使用, Falseならキャッシュ削除")
+    parser.add_argument("--seed", type=int, default=42, help="データ選択のシード")
+    parser.add_argument("--sample_size", type=int, default=2500, help="サンプル削減レート")
+    parser.add_argument("--batch_size", type=int, default=100, help="バッチサイズ")
     args = parser.parse_args()
 
-    if args.mode == "train":
-        func_train_and_eval(args)
+    # 使用済みデータのインデックスを追跡するセットを保持
+    used_indices = set()
+    logger.info(f"データの追跡セットを初期化しました。")
+
+    for i in range(100):
+        logger.info(f"=== 実行{i+1}回目 ===")
+        func_train_and_eval(args, used_indices)
 
 if __name__ == "__main__":
     main()
